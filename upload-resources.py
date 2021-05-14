@@ -179,7 +179,10 @@ def upload_resources(args: Namespace, sorted_resources: List[Dict[str, Union[Nam
                     choices = [
                         inquirer.List('action',
                                       "What should we do?",
-                                      choices=["Ignore", "Edit", "Retry"])
+                                      choices=[("Ignore (continue with the next resource)", "Ignore"),
+                                               ("Edit (using your editor from $EDITOR)", "Edit"),
+                                               ("Retry (because you have changed something else)", "Retry")
+                                               ])
                     ]
                     action = inquirer.prompt(choices)['action']
                     if action == "Ignore":
