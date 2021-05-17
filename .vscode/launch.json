@@ -10,8 +10,14 @@
       "request": "launch",
       "program": "${workspaceFolder}/upload-resources.py",
       "console": "integratedTerminal",
+      "presentation": {
+        "hidden": false,
+        "group": "",
+        "order": 1,
+        "clear": true
+      },
       "args": [
-        "--endpoint=http://141.83.20.219:8080/fhir",
+        "--endpoint=http://joshua-athena-linux.local:8080/fhir",
         "--input-dir=/Users/yoshi/Downloads/gecco-resources-1.0.4/",
         "--patch-dir=/Users/yoshi/Downloads/gecco-patches",
         "--authentication-credential=letmein",

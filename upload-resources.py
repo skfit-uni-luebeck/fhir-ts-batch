@@ -1,24 +1,37 @@
 from argparse import ArgumentParser, Namespace
 import argparse
 import os
-from os import path
-from typing import Dict, List, Union
+from typing import Dict, List, Set, Union
+from urllib import request
 from fhir.resources.codesystem import CodeSystem
-from fhir.resources.valueset import ValueSet
+from fhir.resources.valueset import ValueSet, ValueSetExpansion
 from fhir.resources.conceptmap import ConceptMap
 from fhir.resources.namingsystem import NamingSystem
 from fhir.resources.operationoutcome import OperationOutcome
-from fhir.resources.codeableconcept import CodeableConcept
 import json
 from urllib.parse import urlparse, urljoin
 from urllib.request import getproxies
 from inquirer.shortcuts import editor
 import requests
-from requests.sessions import Request
+from requests.models import Response
+from requests.sessions import Request, Session
 import inquirer
 import tempfile
 import editor
 import diff_match_patch as dmp_module
+from rich.console import Console
+from rich.theme import Theme
+from collections import Counter
+
+
+custom_theme = Theme({
+    "info": "dim cyan",
+    "warning": "bold magenta",
+    "low-warning": "magenta",
+    "error": "bold red",
+    "success": "green"
+})
+console = Console(theme=custom_theme)
 
 
 def dir_path(string):
@@ -47,17 +60,17 @@ def validate_files(args: Namespace):
     files: Dict[str, str] = {tw.name: "".join(
         tw.readlines()) for tw in args.files}
     if args.input_directory != None:
-        print(f"using resources from {args.input_directory}")
+        console.log(f"using resources from {args.input_directory}")
         for f in os.listdir(args.input_directory):
             try:
                 with open(os.path.join(args.input_directory, f), "r", encoding="utf-8") as fp:
                     files[fp.name] = "".join(fp.readlines())
             except:
-                print(
-                    f"file {f} in {args.input_directory} could not be parsed as a UTF-8 Text file. It will be ignored.")
+                console.log(
+                    f"file {f} in {args.input_directory} could not be parsed as a UTF-8 Text file. It will be ignored.", style="low-warning")
     for filename, file_content in files.items():
-        errors = []
-        print(filename)
+        issues = []
+        console.log(filename)
         try:
             parsed_json = json.loads(file_content)
             fhir_resource = None
@@ -65,31 +78,31 @@ def validate_files(args: Namespace):
                 resourceType = parsed_json["resourceType"]
                 if (resourceType == "CodeSystem"):
                     fhir_resource = CodeSystem.parse_obj(parsed_json)
-                    print(f" - CodeSystem {fhir_resource.name} ")
+                    console.log(f"CodeSystem {fhir_resource.name} ")
                 elif (resourceType == "ValueSet"):
                     fhir_resource = ValueSet.parse_obj(parsed_json)
-                    print(f" - ValueSet {fhir_resource.name} ")
+                    console.log(f"ValueSet {fhir_resource.name} ")
                 elif (resourceType == "ConceptMap"):
                     fhir_resource = ConceptMap.parse_obj(parsed_json)
-                    print(f" - ConceptMap {fhir_resource.name} ")
+                    console.log(f"ConceptMap {fhir_resource.name} ")
                 elif (resourceType == "NamingSystem"):
                     fhir_resource = NamingSystem.parse_obj(parsed_json)
-                    print(f" - NamingSystem {fhir_resource.name} ")
+                    console.log(f"NamingSystem {fhir_resource.name} ")
                 else:
-                    errors.append(
+                    issues.append(
                         f"The resource type {resourceType} is not supported by this script!")
                 if (fhir_resource != None):
                     valid_resources[filename] = fhir_resource
 
         except:
-            errors.append(
+            issues.append(
                 "The resource could not be parsed as FHIR. If it is in XML format, please convert it to JSON!")
 
-        if len(errors) > 0:
-            print(
-                "! The file can not be converted due to the following error(s):", sep="\n - ")
-            print("\n - ".join(errors))
-        print()
+        if len(issues) > 0:
+            console.log(
+                "The file can not be converted due to the following issue(s):", style="low-warning")
+            console.log(issues, style="low-warning")
+        console.line()
     return valid_resources
 
 
@@ -108,28 +121,34 @@ def sort_resources(resources: Dict[str, Union[NamingSystem, CodeSystem, ValueSet
 
 def upload_resources(args: Namespace, sorted_resources: List[Dict[str, Union[NamingSystem, CodeSystem, ValueSet, ConceptMap]]], max_tries: int = 10):
     base = urlparse(args.endpoint.rstrip('/') + "/")
-    print(f"\n\n")
-    print("##########")
-    print(f"Uploading resources to {base.geturl()}...")
+    console.line(2)
+    console.log("##########")
+    console.log(f"Uploading resources to {base.geturl()}...")
     session = requests.session()
     session.headers.update({
         "Accept": "application/json",
         "Content-Type": "application/json"
     })
     session.proxies = getproxies()
+    if (getproxies()):
+        console.log("Using proxy: ", getproxies(), style="info", sep=" ")
     if (args.authentication_credential != None):
         auth = f"{args.authentication_type} {args.authentication_credential}"
-        print(f"Using auth header: '{auth[:10]}...'")
+        console.log(f"Using auth header: '{auth[:10]}...'", style="info")
         session.headers.update(
             {"Authorization": auth})
+
     for resource_list in sorted_resources:
         for filename, res in resource_list.items():
+            console.line()
             current_resource = res
             resource_type = res.resource_type
-            print(f"{resource_type} {res.name}, version {res.version}")
+            console.log(f"{resource_type} {res.name}, version {res.version}")
             method = "PUT"
             if (res.id == None):
-                print(" - The resource has no ID specified. That is not optimal! If you want to specify an ID, do so now. If you provide nothing, the ID will be autogenerated by the server.")
+                console.log(
+                    "The resource has no ID specified. That is not optimal! If you want to specify an ID, do so now. " +
+                    "If you provide nothing, the ID will be autogenerated by the server.", style="warning")
                 new_id = input("ID? ").strip()
                 if (new_id == ""):
                     endpoint: str = urljoin(base.geturl(), resource_type)
@@ -139,65 +158,79 @@ def upload_resources(args: Namespace, sorted_resources: List[Dict[str, Union[Nam
             if method == "PUT":
                 endpoint: str = urljoin(
                     base.geturl(), f"{resource_type}/{res.id}")
-            print(f" -> {method} {endpoint}")
+            console.log(f"Using {method} to {endpoint}", style="info")
 
             upload_success = False
-            count_uploads = 1
+            count_uploads = 0
             while (not upload_success and count_uploads <= max_tries):
-                print(f" - uploading (try #{count_uploads}/{max_tries})")
+                count_uploads += 1
+                console.log(
+                    f"uploading (try #{count_uploads}/{max_tries})", style="info")
                 js = json.loads(current_resource.json())
                 prepared_rx = Request(method=method, url=endpoint,
+                                      headers=session.headers,
                                       json=js).prepare()
                 request_result = session.send(prepared_rx)
-                print(f" - received status code {request_result.status_code}")
+                console.log(
+                    f"received status code {request_result.status_code}")
                 if request_result.status_code >= 200 and request_result.status_code < 300:
                     created_id = request_result.json()["id"]
-                    print(
-                        f" + The resource was created successfully at {created_id}")
+                    console.log(
+                        f"The resource was created successfully at {created_id}", style="success")
+                    resource_url = request_result.headers.get(
+                        'Content-Location', f"{endpoint}/{created_id}")
+                    console.log(
+                        f"URL of the resource: {resource_url}", style="success")
                     if (res.resource_type == "ValueSet"):
-                        print("the resource is a ValueSet. Attempting expansion!")
-                        upload_success = try_expand_valueset(endpoint, res)
+                        console.log(
+                            "The resource is a ValueSet. Attempting expansion!", style="low-warning")
+                        upload_success = try_expand_valueset(
+                            session, endpoint, res)
+                        if upload_success:
+                            console.log(
+                                f"The ValueSet was expanded successfully at {created_id}", style="success")
                     else:
                         upload_success = True
                 else:
-                    print(" ! This status code means an error occurred.")
-                    try:
-                        op_outcome = OperationOutcome.parse_obj(
-                            request_result.json())
-                        issues = []
-                        for iss in op_outcome.issue:
-                            if iss.details != None:
-                                cc: CodeableConcept = iss.details
-                                issues.append(cc.json())
-                            join_issues = " -!".join(issues)
-                        print(f" -! {join_issues}")
-                    except:
-                        print(
-                            "Could not parse the result as JSON! Here is the raw response.")
-                        print(request_result.text())
-
+                    console.log(
+                        "This status code means an error occurred.", style="error")
+                    print_operation_outcome(request_result)
+                if not upload_success:
                     choices = [
                         inquirer.List('action',
                                       "What should we do?",
                                       choices=[("Ignore (continue with the next resource)", "Ignore"),
                                                ("Edit (using your editor from $EDITOR)", "Edit"),
-                                               ("Retry (because you have changed something else)", "Retry")
+                                               ("Retry (because you have changed/uploaded something else)", "Retry")
                                                ])
                     ]
                     action = inquirer.prompt(choices)['action']
                     if action == "Ignore":
-                        print("The file is ignored. Proceeding with the next file.")
+                        console.log(
+                            "The file is ignored. Proceeding with the next file.", style="warning")
                         break
                     elif action == "Retry":
-                        print("We will try again!")
+                        console.log("We will try again!", style="info")
                     else:
                         edited_file = None
                         while (edited_file == None):
                             edited_file = edit_file(
                                 filename, current_resource, count_uploads, args.patch_dir)
                         current_resource = edited_file
-                    count_uploads += 1
                     continue
+
+
+def print_operation_outcome(result: Response):
+    try:
+        op_outcome = OperationOutcome.parse_obj(
+            result.json())
+        issue = [i.json() for i in op_outcome.issue]
+        console.log("FHIR OperationOutcome Issue: ",
+                    issue, style="error")
+    except:
+        console.log(
+            "Could not parse the result as JSON/OperationOutcome! Here is the raw response.", style="error")
+        console.log(result.text, style="error")
 
 
 def edit_file(filename: str, resource: Union[NamingSystem, CodeSystem, ValueSet, ConceptMap], count_uploads: int, patch_dir: str):
@@ -210,12 +243,14 @@ def edit_file(filename: str, resource: Union[NamingSystem, CodeSystem, ValueSet,
         try:
             edited_file = editor.edit(filename=temp_filename)
         except Exception as e:
-            print(f"An error occurred when editing {temp_filename}")
+            console.log(
+                f"An error occurred when editing {temp_filename}", e, style="error")
             return None
         try:
             js = json.loads(edited_file)
         except Exception as e:
-            print("An error occurred when parsing the edited file as JSON", e)
+            console.log(
+                "An error occurred when parsing the edited file as JSON", e, style="error")
             return None
         try:
             edited_text = json.dumps(js, indent=2)
@@ -226,16 +261,16 @@ def edit_file(filename: str, resource: Union[NamingSystem, CodeSystem, ValueSet,
                 patch = dmp.patch_make(original_text, edited_text)
                 with open(patch_filename, "w") as patch_fp:
                     patch_fp.write(dmp.patch_toText(patch))
-                print(
+                console.log(
                     f"Wrote patch file for revision {count_uploads} to {patch_filename}")
                 edited_filename = os.path.join(
                     patch_dir, f"{os.path.basename(filename)}-revision{count_uploads}.edited")
                 with open(edited_filename, "w") as edited_fp:
                     edited_fp.write(edited_text)
-                print(
+                console.log(
                     f"Wrote edited file for revision {count_uploads} to {edited_filename}")
         except:
-            print("An error occurred writing the patch.")
+            console.log("An error occurred writing the patch.")
         try:
             if resource.resource_type == "NamingSystem":
                 return NamingSystem.parse_file(temp_filename)
@@ -246,13 +281,55 @@ def edit_file(filename: str, resource: Union[NamingSystem, CodeSystem, ValueSet,
             elif resource.resource_type == "ConceptMap":
                 return ConceptMap.parse_file(temp_filename)
         except Exception as e:
-            print(
+            console.log(
                 f"The edited file could not be parsed as a FHIR {resource.resource_type}!", e)
 
 
-def try_expand_valueset():
-    # TODO
-    return False
+def try_expand_valueset(session: Session, endpoint: str, vs: ValueSet) -> bool:
+    expansion_endpoint = f"{endpoint}/$expand"
+    expand_request = Request(
+        method="GET", url=expansion_endpoint, headers=session.headers).prepare()
+    expansion_result = session.send(expand_request)
+    status = expansion_result.status_code
+    if status >= 200 and status < 300:
+        console.log(
+            f"Expansion operation completed successfully with status code {status}")
+        expansion_vs = ValueSet.parse_obj(expansion_result.json())
+        expansion: ValueSetExpansion = expansion_vs.expansion
+        number_concepts = len(expansion.contains)
+        console.log(
+            f"Expanded ValueSet contains {number_concepts} concepts")
+        contained_codesystems: Set[str] = set(
+            [i.system for i in vs.compose.include])
+        # moved these assignments to the listcomp above!
+        # for include_item in vs.compose.include:
+        # contained_codesystems.add(
+        #     f"{include_item.system}, version {include_item.version}")
+        # contained_codesystems.add(include_item.system)
+        # system_map = list(map(
+        #     lambda x: f"{x.system}, version {x.version}", expansion.contains))
+        system_map = list(map(lambda x: x.system, expansion.contains))
+        system_counts = {l: system_map.count(l) for l in set(system_map)}
+        # if len(system_counts.keys()) > 1:
+        console.log("Concepts by system: ", system_counts, style="info")
+        empty_systems = [x for x, c in system_counts.items() if c ==
+                         0 and x in contained_codesystems]
+        missing_expand_systems = [
+            x for x in contained_codesystems if x not in system_counts.keys()]
+        if any(empty_systems):
+            console.log("The following systems have no concepts: ",
+                        empty_systems, style="error")
+            console.log("This should be regarded as an error!")
+            return False
+        elif any(missing_expand_systems):
+            console.log(
+                "There are code systems referenced in the `compose.include` of the ValueSet, but missing in the expansion:", missing_expand_systems, style="error")
+            return False
+        return True
+    else:
+        console.log("This was an error in expansion!", style="error")
+        print_operation_outcome(expansion_result)
+        return False
 
 
 if __name__ == "__main__":

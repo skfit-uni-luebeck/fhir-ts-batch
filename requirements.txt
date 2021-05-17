@@ -4,3 +4,4 @@ inquirer
 python-editor
 pynvim #for support of Neovim for the author ;)
 diff-match-patch
+rich
