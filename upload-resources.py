@@ -4,6 +4,7 @@ import os
 from typing import Dict, List, Set, Union
 from urllib import request
 from fhir.resources.codesystem import CodeSystem
+from fhir.resources.fhirtypes import Boolean
 from fhir.resources.valueset import ValueSet, ValueSetExpansion
 from fhir.resources.conceptmap import ConceptMap
 from fhir.resources.namingsystem import NamingSystem
@@ -221,12 +222,15 @@ def upload_resources(args: Namespace, sorted_resources: List[Dict[str, Union[Nam
                                 f"The ValueSet was expanded successfully at {created_id}")
                     else:
                         upload_success = True
+                else:
+                    log.error("This status code means an error occurred.")
+                    print_operation_outcome(request_result)
                 if not upload_success:
                     choices = [
                         inquirer.List('action',
                                       "What should we do?",
-                                      choices=[("Ignore (continue with the next resource)", "Ignore"),
-                                               ("Edit (using your editor from $EDITOR)", "Edit"),
+                                      choices=[("Edit (using your editor from $EDITOR)", "Edit"),
+                                               ("Ignore (continue with the next resource)", "Ignore"),
                                                ("Retry (because you have changed/uploaded something else)", "Retry")
                                                ])
                     ]
@@ -253,12 +257,12 @@ def upload_resources(args: Namespace, sorted_resources: List[Dict[str, Union[Nam
                                       choices=[
                                           ("No (continue with the next resource)", "no"),
                                           ("Yes (open the file using $EDITOR)", "yes")])]
-                    action = inquirer.prompt(choices)['action']
+                    action = inquirer.prompt(choices)['action'].strip().lower()
                     if action == "yes":
                         edited_file = None
                         while (edited_file == None):
                             edited_file = edit_file(
-                                filename, res, count_uploads, args.patch_dir)
+                                filename, res, count_uploads, args.patch_dir, manual=True)
                         res = edited_file
                         upload_success = False
                     else:
@@ -278,7 +282,7 @@ def print_operation_outcome(result: Response):
         log.exception("This exception was thrown.")
 
 
-def edit_file(filename: str, resource: Union[NamingSystem, CodeSystem, ValueSet, ConceptMap], count_uploads: int, patch_dir: str):
+def edit_file(filename: str, resource: Union[NamingSystem, CodeSystem, ValueSet, ConceptMap], count_uploads: int, patch_dir: str, manual: Boolean = False):
     with tempfile.NamedTemporaryFile("w", encoding="utf-8", prefix=os.path.basename(filename), suffix=f"{count_uploads}.json") as temp_fp:
         temp_filename = temp_fp.name
         js = json.loads(resource.json())
@@ -299,9 +303,12 @@ def edit_file(filename: str, resource: Union[NamingSystem, CodeSystem, ValueSet,
             return None
         try:
             edited_text = json.dumps(js, indent=2)
+            raw_filename = f"{os.path.basename(filename)}-revision{count_uploads}"
+            if (manual):
+                raw_filename += "_manual"
             if patch_dir != None:
                 patch_filename = os.path.join(
-                    patch_dir, f"{os.path.basename(filename)}-revision{count_uploads}.patch")
+                    patch_dir, f"{raw_filename}.patch")
                 dmp = dmp_module.diff_match_patch()
                 patch = dmp.patch_make(original_text, edited_text)
                 with open(patch_filename, "w") as patch_fp:
@@ -309,7 +316,7 @@ def edit_file(filename: str, resource: Union[NamingSystem, CodeSystem, ValueSet,
                 log.info(
                     f"Wrote patch file for revision {count_uploads} to {patch_filename}")
                 edited_filename = os.path.join(
-                    patch_dir, f"{os.path.basename(filename)}-revision{count_uploads}.edited")
+                    patch_dir, f"{raw_filename}.edited")
                 with open(edited_filename, "w") as edited_fp:
                     edited_fp.write(edited_text)
                 log.info(
