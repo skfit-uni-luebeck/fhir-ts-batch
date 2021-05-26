@@ -69,7 +69,8 @@ def parse_args():
                         help="a directory where patches and modified files are written to. Not required, but recommended!")
     parser.add_argument("--log-level", type=str, choices=["NOTSET", "DEBUG", "INFO", "WARNING", "ERROR"], default="INFO",
                         help="Log level")
-    parser.add_argument("--log-file", type=str)
+    parser.add_argument("--log-file", type=str,
+                        help="Filename where a log file should be written to. If not provided, output will only be provided to STDOUT")
     parser.add_argument("files", nargs="*", type=argparse.FileType("r"),
                         help="You can list JSON files that should be converted, independent of the input dir parameter. XML is NOT supported")
     args = parser.parse_args()
@@ -80,6 +81,16 @@ def parse_args():
     if (args.files == [] and args.input_directory == None):
         parser.print_help()
         exit(1)
+    editor = os.getenv("EDITOR")
+    if editor == None:
+        log.warning(
+            "No editor is configured using the variable $EDITOR ! This may lead to undefined behaviour when opening files!")
+    else:
+        log.info(f"Using editor: '{editor}'")
+    log.info("Command line arguments:")
+    for arg in vars(args):
+        log.info(f" - {arg} : {getattr(args, arg)}")
+    input("Press any key to continue.")
     return args
 
 
