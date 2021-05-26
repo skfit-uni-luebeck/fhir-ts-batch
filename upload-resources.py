@@ -1,8 +1,9 @@
 from argparse import ArgumentParser, Namespace
 import argparse
 import os
+import subprocess
+from sys import stdout
 from typing import Dict, List, Set, Union
-from urllib import request
 from fhir.resources.codesystem import CodeSystem
 from fhir.resources.fhirtypes import Boolean
 from fhir.resources.valueset import ValueSet, ValueSetExpansion
@@ -12,7 +13,6 @@ from fhir.resources.operationoutcome import OperationOutcome
 import json
 from urllib.parse import urlparse, urljoin
 from urllib.request import getproxies
-from inquirer.prompt import prompt
 from inquirer.shortcuts import editor
 import requests
 from requests.models import Response
@@ -20,19 +20,26 @@ from requests.sessions import Request, Session
 import inquirer
 import tempfile
 import editor
-import diff_match_patch as dmp_module
-from rich import console
 from rich.logging import RichHandler
 import logging
 
-logging.basicConfig(
-    level="NOTSET",
-    format="%(message)s",
-    datefmt="[%X]",
-    handlers=[RichHandler(rich_tracebacks=True)]
-)
 
-log = logging.getLogger("rich")
+def configure_logging(level: str = "NOTSET", filename=None):
+    handlers = [RichHandler(rich_tracebacks=True)]
+    if filename != None:
+        handlers.append(logging.FileHandler(
+            os.path.abspath(filename), mode="w"))
+    logging.basicConfig(
+        level=level,
+        format="%(message)s",
+        datefmt="[%X]",
+        handlers=handlers,
+        force=True
+    )
+    return logging.getLogger()
+
+
+log = configure_logging()
 
 
 def dir_path(string):
@@ -62,10 +69,11 @@ def parse_args():
                         help="a directory where patches and modified files are written to. Not required, but recommended!")
     parser.add_argument("--log-level", type=str, choices=["NOTSET", "DEBUG", "INFO", "WARNING", "ERROR"], default="INFO",
                         help="Log level")
+    parser.add_argument("--log-file", type=str)
     parser.add_argument("files", nargs="*", type=argparse.FileType("r"),
                         help="You can list JSON files that should be converted, independent of the input dir parameter. XML is NOT supported")
     args = parser.parse_args()
-    log.setLevel(args.log_level)
+    log = configure_logging(args.log_level, args.log_file)
     if args.patch_dir == None:
         log.warning(
             "No patch directory is specified and patches will NOT be written. This is not recommended!")
@@ -234,7 +242,9 @@ def upload_resources(args: Namespace, sorted_resources: List[Dict[str, Union[Nam
                                                ("Retry (because you have changed/uploaded something else)", "Retry")
                                                ])
                     ]
+                    stdout.flush()
                     action = inquirer.prompt(choices)['action']
+                    stdout.flush()
                     if action == "Ignore":
                         log.warning(
                             "The file is ignored. Proceeding with the next file.")
@@ -257,7 +267,9 @@ def upload_resources(args: Namespace, sorted_resources: List[Dict[str, Union[Nam
                                       choices=[
                                           ("No (continue with the next resource)", "no"),
                                           ("Yes (open the file using $EDITOR)", "yes")])]
+                    stdout.flush()
                     action = inquirer.prompt(choices)['action'].strip().lower()
+                    stdout.flush()
                     if action == "yes":
                         edited_file = None
                         while (edited_file == None):
@@ -309,10 +321,25 @@ def edit_file(filename: str, resource: Union[NamingSystem, CodeSystem, ValueSet,
             if patch_dir != None:
                 patch_filename = os.path.join(
                     patch_dir, f"{raw_filename}.patch")
-                dmp = dmp_module.diff_match_patch()
-                patch = dmp.patch_make(original_text, edited_text)
-                with open(patch_filename, "w") as patch_fp:
-                    patch_fp.write(dmp.patch_toText(patch))
+
+                #dmp = dmp_module.diff_match_patch()
+                #patch = dmp.patch_make(original_text, edited_text)
+                with tempfile.NamedTemporaryFile("w", encoding="utf-8", prefix=raw_filename, suffix="-original.json") as original_tempfp:
+                    with tempfile.NamedTemporaryFile("w", encoding="utf-8", prefix=raw_filename, suffix="-patch.json") as edited_tempfp:
+                        original_tempfp.write(original_text)
+                        original_tempfp.flush()
+                        edited_tempfp.write(edited_text)
+                        edited_tempfp.flush()
+                        with open(patch_filename, "wb") as patch_fp:
+                            command = f"diff {os.path.abspath(original_tempfp.name)} {os.path.abspath(edited_tempfp.name)}"
+                            process = subprocess.Popen(
+                                command.split(), stdout=subprocess.PIPE)
+                            patch, error = process.communicate()
+                            if (error == None):
+                                patch_fp.write(patch)
+                            else:
+                                log.error(
+                                    f"Error writing diff to {patch_filename}")
                 log.info(
                     f"Wrote patch file for revision {count_uploads} to {patch_filename}")
                 edited_filename = os.path.join(
@@ -394,3 +421,4 @@ if __name__ == "__main__":
     valid_resources = validate_files(args, files)
     sorted_resources = sort_resources(valid_resources)
     upload_resources(args, sorted_resources)
+    log.info("We are done!")

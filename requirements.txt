@@ -1,7 +1,6 @@
-fhir.resources
-requests
-inquirer
-python-editor
+fhir.resources #FHIR structure validation
+requests #HTTP for humans
+inquirer #pretty prompts for the user
+python-editor #open files in $EDITOR
 pynvim #for support of Neovim for the author ;)
-diff-match-patch
-rich
+rich #pretty console output
