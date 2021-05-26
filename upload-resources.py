@@ -65,7 +65,7 @@ def parse_args():
                         type=dir_path,
                         help="Directory where resources should be converted from. Resources that are not FHIR Terminology resources in JSON are skipped (XML is NOT supported)!"
                         )
-    parser.add_argument("--patch-dir", type=dir_path,
+    parser.add_argument("--patch-directory", type=dir_path,
                         help="a directory where patches and modified files are written to. Not required, but recommended!")
     parser.add_argument("--log-level", type=str, choices=["NOTSET", "DEBUG", "INFO", "WARNING", "ERROR"], default="INFO",
                         help="Log level")
@@ -75,7 +75,7 @@ def parse_args():
                         help="You can list JSON files that should be converted, independent of the input dir parameter. XML is NOT supported")
     args = parser.parse_args()
     log = configure_logging(args.log_level, args.log_file)
-    if args.patch_dir == None:
+    if args.patch_directory == None:
         log.warning(
             "No patch directory is specified and patches will NOT be written. This is not recommended!")
     if (args.files == [] and args.input_directory == None):
@@ -266,7 +266,7 @@ def upload_resources(args: Namespace, sorted_resources: List[Dict[str, Union[Nam
                         edited_file = None
                         while (edited_file == None):
                             edited_file = edit_file(
-                                filename, res, count_uploads, args.patch_dir)
+                                filename, res, count_uploads, args.patch_directory)
                         res = edited_file
                     continue
                 else:
@@ -285,7 +285,7 @@ def upload_resources(args: Namespace, sorted_resources: List[Dict[str, Union[Nam
                         edited_file = None
                         while (edited_file == None):
                             edited_file = edit_file(
-                                filename, res, count_uploads, args.patch_dir, manual=True)
+                                filename, res, count_uploads, args.patch_directory, manual=True)
                         res = edited_file
                         upload_success = False
                     else:
@@ -305,7 +305,7 @@ def print_operation_outcome(result: Response):
         log.exception("This exception was thrown.")
 
 
-def edit_file(filename: str, resource: Union[NamingSystem, CodeSystem, ValueSet, ConceptMap], count_uploads: int, patch_dir: str, manual: Boolean = False):
+def edit_file(filename: str, resource: Union[NamingSystem, CodeSystem, ValueSet, ConceptMap], count_uploads: int, patch_directory: str, manual: Boolean = False):
     with tempfile.NamedTemporaryFile("w", encoding="utf-8", prefix=os.path.basename(filename), suffix=f"{count_uploads}.json") as temp_fp:
         temp_filename = temp_fp.name
         js = json.loads(resource.json())
@@ -329,12 +329,9 @@ def edit_file(filename: str, resource: Union[NamingSystem, CodeSystem, ValueSet,
             raw_filename = f"{os.path.basename(filename)}-revision{count_uploads}"
             if (manual):
                 raw_filename += "_manual"
-            if patch_dir != None:
+            if patch_directory != None:
                 patch_filename = os.path.join(
-                    patch_dir, f"{raw_filename}.patch")
-
-                #dmp = dmp_module.diff_match_patch()
-                #patch = dmp.patch_make(original_text, edited_text)
+                    patch_directory, f"{raw_filename}.patch")
                 with tempfile.NamedTemporaryFile("w", encoding="utf-8", prefix=raw_filename, suffix="-original.json") as original_tempfp:
                     with tempfile.NamedTemporaryFile("w", encoding="utf-8", prefix=raw_filename, suffix="-patch.json") as edited_tempfp:
                         original_tempfp.write(original_text)
@@ -354,7 +351,7 @@ def edit_file(filename: str, resource: Union[NamingSystem, CodeSystem, ValueSet,
                 log.info(
                     f"Wrote patch file for revision {count_uploads} to {patch_filename}")
                 edited_filename = os.path.join(
-                    patch_dir, f"{raw_filename}.edited")
+                    patch_directory, f"{raw_filename}.edited")
                 with open(edited_filename, "w") as edited_fp:
                     edited_fp.write(edited_text)
                 log.info(
@@ -382,7 +379,6 @@ def try_expand_valueset(session: Session, endpoint: str, vs: ValueSet) -> bool:
     expansion_result = session.send(expand_request)
     status = expansion_result.status_code
     if status >= 200 and status < 300:
-
         log.info(
             f"Expansion operation completed successfully with status code {status}")
         try:
@@ -399,7 +395,6 @@ def try_expand_valueset(session: Session, endpoint: str, vs: ValueSet) -> bool:
                 [i.system for i in vs.compose.include])
             system_map = list(map(lambda x: x.system, expansion.contains))
             system_counts = {l: system_map.count(l) for l in set(system_map)}
-            # if len(system_counts.keys()) > 1:
             log.info("Concepts by system: %s", system_counts)
             empty_systems = [x for x, c in system_counts.items() if c ==
                              0 and x in contained_codesystems]
