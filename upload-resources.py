@@ -27,8 +27,11 @@ import logging
 def configure_logging(level: str = "NOTSET", filename=None):
     handlers = [RichHandler(rich_tracebacks=True)]
     if filename != None:
-        handlers.append(logging.FileHandler(
-            os.path.abspath(filename), mode="w"))
+        formatter = logging.Formatter(fmt="%(levelname)s %(message)s")
+        filehandler = logging.FileHandler(
+            os.path.abspath(filename), mode="w")
+        filehandler.setFormatter(formatter)
+        handlers.append(filehandler)
     logging.basicConfig(
         level=level,
         format="%(message)s",
