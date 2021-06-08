@@ -34,27 +34,51 @@ python upload-resources.py --help
 ```
 
 ```
-usage: upload-resources.py [-h] [--endpoint ENDPOINT] [--authentication-credential AUTHENTICATION_CREDENTIAL] [--authentication-type {Bearer,Basic}] [--input-directory INPUT_DIRECTORY]
-                           [--patch-directory PATCH_DIRECTORY] [--log-level {NOTSET,DEBUG,INFO,WARNING,ERROR}] [--log-file LOG_FILE]
-                           [files [files ...]]
+usage: upload-resources.py [-h] [--endpoint ENDPOINT]
+                           [--authentication-credential AUTHENTICATION_CREDENTIAL]
+                           [--authentication-type {Bearer,Basic}]
+                           [--input-directory INPUT_DIRECTORY]
+                           [--patch-directory PATCH_DIRECTORY]
+                           [--log-level {NOTSET,DEBUG,INFO,WARNING,ERROR}]
+                           [--log-file LOG_FILE] [--cert CERT]
+                           [files ...]
 
 positional arguments:
-  files                 You can list JSON files that should be converted, independent of the input dir parameter. XML is NOT supported (default: None)
+  files                 You can list JSON files that should be converted,
+                        independent of the input dir parameter. XML is NOT
+                        supported (default: None)
 
 optional arguments:
   -h, --help            show this help message and exit
-  --endpoint ENDPOINT   The FHIR TS endpoint (default: http://localhost:8080/fhir)
+  --endpoint ENDPOINT   The FHIR TS endpoint (default:
+                        http://localhost:8080/fhir)
   --authentication-credential AUTHENTICATION_CREDENTIAL
-                        An authentication credential. If blank, no authentication will be presented to the TS. (default: None)
+                        An authentication credential. If blank, no
+                        authentication will be presented to the TS. (default:
+                        None)
   --authentication-type {Bearer,Basic}
-                        The type of authentication credential (default: Bearer)
+                        The type of authentication credential (default:
+                        Bearer)
   --input-directory INPUT_DIRECTORY
-                        Directory where resources should be converted from. Resources that are not FHIR Terminology resources in JSON are skipped (XML is NOT supported)! (default: None)
+                        Directory where resources should be converted from.
+                        Resources that are not FHIR Terminology resources in
+                        JSON are skipped (XML is NOT supported)! (default:
+                        None)
   --patch-directory PATCH_DIRECTORY
-                        a directory where patches and modified files are written to. Not required, but recommended! (default: None)
+                        a directory where patches and modified files are
+                        written to. Not required, but recommended! (default:
+                        None)
   --log-level {NOTSET,DEBUG,INFO,WARNING,ERROR}
                         Log level (default: INFO)
-  --log-file LOG_FILE   Filename where a log file should be written to. If not provided, output will only be provided to STDOUT (default: None)
+  --log-file LOG_FILE   Filename where a log file should be written to. If not
+                        provided, output will only be provided to STDOUT
+                        (default: None)
+  --cert CERT           Provide a PKI keypair to use for mutual TLS
+                        authentication. You can either provide a single file
+                        path, containing both the public and private key
+                        (often .pem) or two files, seperated by '|': first
+                        public key (often .crt), then private key (often .key)
+                        (default: None)
 ```
 
 You can use those commands to provide the file you need.
