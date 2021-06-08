@@ -74,8 +74,12 @@ def parse_args():
                         help="Log level")
     parser.add_argument("--log-file", type=str,
                         help="Filename where a log file should be written to. If not provided, output will only be provided to STDOUT")
+    parser.add_argument("--cert", type=str,
+                        help="Provide a PKI keypair to use for mutual TLS authentication. You can either provide a single file path, containing both " +
+                        "the public and private key (often .pem) or two files, seperated by '|': first public key (often .crt), then private key (often .key)")
     parser.add_argument("files", nargs="*", type=argparse.FileType("r"),
                         help="You can list JSON files that should be converted, independent of the input dir parameter. XML is NOT supported")
+
     args = parser.parse_args()
     log = configure_logging(args.log_level, args.log_file)
     if args.patch_directory == None:
@@ -180,13 +184,31 @@ def upload_resources(args: Namespace, sorted_resources: List[Dict[str, Union[Nam
         "Content-Type": "application/json"
     })
     session.proxies = getproxies()
-    if (getproxies()):
-        log.info("Using proxy: ", getproxies(), sep=" ")
-    if (args.authentication_credential != None):
+    if getproxies():
+        log.info(f"Using proxy: {getproxies()}")
+    if args.authentication_credential != None:
         auth = f"{args.authentication_type} {args.authentication_credential}"
         log.info(f"Using auth header: '{auth[:10]}...'")
         session.headers.update(
             {"Authorization": auth})
+    if args.cert != None:
+        if "|" in args.cert:
+            public, private = tuple([q.strip() for q in args.cert.split('|')])
+            if not os.path.isfile(public) and os.access(public, os.R_OK):
+                log.error(f"public key at {public} is not readable")
+                exit(1)
+            if not os.path.isfile(private) and os.access(private, os.R_OK):
+                log.error(f"private key at {private} is not readable")
+                exit(1)
+            cert = (public, private)
+            log.info(f"Using public / private key at: {cert}")
+        else:
+            if not os.path.isfile(args.cert) and os.access(args.cert, os.R_OK):
+                log.error(f"combined key at {args.cert} is not readable")
+                exit(1)
+            cert = args.cert
+            log.info(f"Using combined key at: {args.cert}")
+        session.cert = cert
 
     for resource_list in sorted_resources:
         for filename, loaded_resource in resource_list.items():
