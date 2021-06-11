@@ -3,9 +3,10 @@ import argparse
 import os
 import subprocess
 from sys import stdout
-from typing import Dict, List, Set, Union
+from typing import Dict, List, Optional, Set, Union
+from uuid import uuid4
 from fhir.resources.codesystem import CodeSystem
-from fhir.resources.fhirtypes import Boolean
+from fhir.resources.fhirtypes import Boolean, Uuid
 from fhir.resources.valueset import ValueSet, ValueSetExpansion
 from fhir.resources.conceptmap import ConceptMap
 from fhir.resources.namingsystem import NamingSystem
@@ -15,6 +16,7 @@ from urllib.parse import urlparse, urljoin
 from urllib.request import getproxies
 from inquirer.shortcuts import editor
 import requests
+from requests import auth
 from requests.models import Response
 from requests.sessions import Request, Session
 import inquirer
@@ -22,6 +24,10 @@ import tempfile
 import editor
 from rich.logging import RichHandler
 import logging
+from rauth import OAuth2Service, service
+from rich.text import Text
+import pkce
+from urllib.parse import urlparse, parse_qs
 
 
 def configure_logging(level: str = "NOTSET", filename=None):
@@ -56,29 +62,48 @@ def dir_path(string):
 def parse_args():
     parser = ArgumentParser(
         formatter_class=argparse.ArgumentDefaultsHelpFormatter)
-    parser.add_argument("--endpoint", type=str,
-                        default="http://localhost:8080/fhir",
-                        help="The FHIR TS endpoint")
-    parser.add_argument("--authentication-credential", type=str,
-                        help="An authentication credential. If blank, no authentication will be presented to the TS.")
-    parser.add_argument("--authentication-type",
-                        choices=["Bearer", "Basic"], default="Bearer",
-                        help="The type of authentication credential")
-    parser.add_argument("--input-directory",
-                        type=dir_path,
-                        help="Directory where resources should be converted from. Resources that are not FHIR Terminology resources in JSON are skipped (XML is NOT supported)!"
-                        )
-    parser.add_argument("--patch-directory", type=dir_path,
-                        help="a directory where patches and modified files are written to. Not required, but recommended!")
-    parser.add_argument("--log-level", type=str, choices=["NOTSET", "DEBUG", "INFO", "WARNING", "ERROR"], default="INFO",
-                        help="Log level")
-    parser.add_argument("--log-file", type=str,
-                        help="Filename where a log file should be written to. If not provided, output will only be provided to STDOUT")
-    parser.add_argument("--cert", type=str,
-                        help="Provide a PKI keypair to use for mutual TLS authentication. You can either provide a single file path, containing both " +
-                        "the public and private key (often .pem) or two files, seperated by '|': first public key (often .crt), then private key (often .key)")
-    parser.add_argument("files", nargs="*", type=argparse.FileType("r"),
-                        help="You can list JSON files that should be converted, independent of the input dir parameter. XML is NOT supported")
+    required_group = parser.add_argument_group("Required")
+    required_group.add_argument("--endpoint", type=str,
+                                default="http://localhost:8080/fhir",
+                                help="The FHIR TS endpoint",
+                                required=True)
+    auth_group = parser.add_argument_group("Authentication")
+
+    auth_group.add_argument("--basic-authentication", type=str,
+                            help="An Basic authentication credential")
+    auth_group.add_argument("--bearer-authentication", type=str,
+                            help="An Bearer authentication credential")
+    auth_group.add_argument("--oauth-authorize",
+                            help="OAuth2 Authorization URL", type=str)
+    auth_group.add_argument("--oauth-token", help="OAuth Token URL", type=str)
+    auth_group.add_argument("--oauth-client-id",
+                            help="OAuth Client ID", type=str)
+    auth_group.add_argument("--oauth-client-secret",
+                            help="OAuth Client Secret", type=str)
+    auth_group.add_argument(
+        "--oauth-redirect", help="Redirect URL for OIDC. Must be legal in the authentication server configuration", type=str)
+    auth_group.add_argument(
+        "--oauth-pkce", help="If provided, use PKCE for authentication", action="store_true")
+    auth_group.add_argument("--cert", type=str,
+                            help="Provide a PKI keypair to use for mutual TLS authentication. You can either provide a single file path, containing both " +
+                            "the public and private key (often .pem) or two files, seperated by '|': first public key (often .crt), then private key (often .key)")
+
+    trace_group = parser.add_argument_group("Traceability")
+    trace_group.add_argument("--patch-directory", type=dir_path,
+                             help="a directory where patches and modified files are written to. Not required, but recommended!")
+
+    trace_group.add_argument("--log-level", type=str, choices=["NOTSET", "DEBUG", "INFO", "WARNING", "ERROR"], default="INFO",
+                             help="Log level")
+    trace_group.add_argument("--log-file", type=str,
+                             help="Filename where a log file should be written to. If not provided, output will only be provided to STDOUT")
+
+    input_group = parser.add_argument_group("Input")
+    input_group.add_argument("--input-directory",
+                             type=dir_path,
+                             help="Directory where resources should be converted from. Resources that are not FHIR Terminology resources in JSON are skipped (XML is NOT supported)!"
+                             )
+    input_group.add_argument("files", nargs="*", type=argparse.FileType("r"),
+                             help="You can list JSON files that should be converted, independent of the input dir parameter. XML is NOT supported")
 
     args = parser.parse_args()
     log = configure_logging(args.log_level, args.log_file)
@@ -99,6 +124,34 @@ def parse_args():
         log.info(f" - {arg} : {getattr(args, arg)}")
     input("Press any key to continue.")
     return args
+
+
+def get_oauth_service(args: Namespace) -> Optional[OAuth2Service]:
+    required_args = [
+        args.oauth_authorize,
+        args.oauth_token,
+        args.oauth_client_id,
+        args.oauth_redirect
+    ]
+    none_args = [x for x in required_args if x is None]
+    present_args = [x for x in required_args if x is not None]
+    if None in none_args and any(present_args):
+        log.error("OAuth2 was not configured correctly. All arguments are required, except for client ID, which can be entered interactively if it is missing.")
+        exit(1)
+    elif len(none_args) == len(required_args):
+        log.debug("Not using OAuth2")
+        return None
+    if args.oauth_client_secret is None:
+        client_secret = inquirer.text("OAuth2 Client Secret")
+        args.oauth_client_secret = client_secret
+    service = OAuth2Service(
+        name="oauth2",
+        access_token_url=args.oauth_token,
+        authorize_url=args.oauth_authorize,
+        client_id=args.oauth_client_id,
+        client_secret=args.oauth_client_secret
+    )
+    return service
 
 
 def gather_files(args: Namespace):
@@ -173,24 +226,16 @@ def sort_resources(resources: Dict[str, Union[NamingSystem, CodeSystem, ValueSet
     return list([namingsystems, codesystems, valuesets, conceptmaps])
 
 
-def upload_resources(args: Namespace, sorted_resources: List[Dict[str, Union[NamingSystem, CodeSystem, ValueSet, ConceptMap]]], max_tries: int = 10):
+def upload_resources(args: Namespace,
+                     sorted_resources: List[Dict[str, Union[NamingSystem, CodeSystem, ValueSet, ConceptMap]]],
+                     oauth_service: Optional[OAuth2Service],
+                     max_tries: int = 10,):
     base = urlparse(args.endpoint.rstrip('/') + "/")
     log.info("\n" * 2)
     log.info("##########")
     log.info(f"Uploading resources to {base.geturl()}...")
     session = requests.session()
-    session.headers.update({
-        "Accept": "application/json",
-        "Content-Type": "application/json"
-    })
-    session.proxies = getproxies()
-    if getproxies():
-        log.info(f"Using proxy: {getproxies()}")
-    if args.authentication_credential != None:
-        auth = f"{args.authentication_type} {args.authentication_credential}"
-        log.info(f"Using auth header: '{auth[:10]}...'")
-        session.headers.update(
-            {"Authorization": auth})
+    cert = None
     if args.cert != None:
         if "|" in args.cert:
             public, private = tuple([q.strip() for q in args.cert.split('|')])
@@ -208,6 +253,75 @@ def upload_resources(args: Namespace, sorted_resources: List[Dict[str, Union[Nam
                 exit(1)
             cert = args.cert
             log.info(f"Using combined key at: {args.cert}")
+            session.cert = cert
+
+    if oauth_service is not None:
+        state = uuid4()
+        nonce = uuid4()
+        scope = "openid"
+        code_verifier: str
+        code_challenge: str
+        auth_params = {
+            "redirect_uri": args.oauth_redirect,
+            "response_type": "code",
+            "state": str(state),
+            "nonce": str(nonce),
+            "scope": scope,
+            "response_mode": "query"
+        }
+        if args.oauth_pkce:
+            code_verifier, code_challenge = pkce.generate_pkce_pair()
+
+            auth_params.update({
+                'code_challenge_method': "S256",
+                "code_challenge": code_challenge,
+            })
+        auth_url = oauth_service.get_authorize_url(**auth_params)
+        log.warning(
+            f"Please visit the authentication URL in the browser. You may need to disable the URL handler for the callback URL in the browser")
+        log.warning(
+            "You will need to copy the resulting URL from the browser and paste it into the dialog below")
+        print(auth_url)
+        auth_code = input("Authentication code? ").strip()
+        # auth_code = inquirer.text("Enter the code parameter of the callback here")
+
+        if "code=" in auth_code:
+            log.info("Parsing returned URL to get the code")
+            o = urlparse(auth_code)
+            auth_code = parse_qs(o.query)["code"]
+        auth_params = {
+            "code": auth_code,
+            'grant_type': 'authorization_code',
+            'redirect_uri': args.oauth_redirect
+        }
+        if args.oauth_pkce:
+            auth_params.update({
+                "code_verifier": code_verifier
+            })
+
+        try:
+            session = oauth_service.get_auth_session(
+                data=auth_params, cert=cert, decoder=lambda x: json.loads(x))
+            session.headers.update(
+                {"Authorization": f"Bearer {session.access_token}"})
+        except Exception:
+            log.exception("Error obtaining OAuth2 Token")
+            exit(1)
+    elif args.basic_auth is not None or args.bearer_auth is not None:
+        auth = f"Basic {args.basic_auth}" if args.bearer_auth is None else f"Bearer {args.bearer_auth}"
+        log.debug(f"Using auth header: '{auth[:10]}...'")
+        session.headers.update(
+            {"Authorization": auth})
+    session.headers.update({
+        "Accept": "application/json",
+        "Content-Type": "application/json"
+    })
+
+    if getproxies():
+        session.proxies = getproxies()
+        log.info(f"Using proxy: {getproxies()}")
+
+    if args.cert != None:
         session.cert = cert
 
     for resource_list in sorted_resources:
@@ -448,8 +562,9 @@ def try_expand_valueset(session: Session, endpoint: str, vs: ValueSet) -> bool:
 
 if __name__ == "__main__":
     args = parse_args()
+    oauth_service = get_oauth_service(args)
     files = gather_files(args)
     valid_resources = validate_files(args, files)
     sorted_resources = sort_resources(valid_resources)
-    upload_resources(args, sorted_resources)
+    upload_resources(args, sorted_resources, oauth_service)
     log.info("We are done!")

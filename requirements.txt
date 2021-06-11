@@ -4,3 +4,5 @@ inquirer #pretty prompts for the user
 python-editor #open files in $EDITOR
 pynvim #for support of Neovim for the author ;)
 rich #pretty console output
+rauth #OAuth2
+pkce #PKCE for OAuth2
