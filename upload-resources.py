@@ -3,10 +3,10 @@ import argparse
 import os
 import subprocess
 from sys import stdout
-from typing import Dict, List, Optional, Set, Union
+from typing import Dict, List, Optional, Set, Tuple, Union
 from uuid import uuid4
 from fhir.resources.codesystem import CodeSystem
-from fhir.resources.fhirtypes import Boolean, Uuid
+from fhir.resources.fhirtypes import Boolean
 from fhir.resources.valueset import ValueSet, ValueSetExpansion
 from fhir.resources.conceptmap import ConceptMap
 from fhir.resources.namingsystem import NamingSystem
@@ -16,18 +16,122 @@ from urllib.parse import urlparse, urljoin
 from urllib.request import getproxies
 from inquirer.shortcuts import editor
 import requests
-from requests import auth
-from requests.models import Response
+from requests.models import HTTPBasicAuth, Response
 from requests.sessions import Request, Session
 import inquirer
 import tempfile
 import editor
 from rich.logging import RichHandler
 import logging
-from rauth import OAuth2Service, service
-from rich.text import Text
+from rauth import OAuth2Service
 import pkce
 from urllib.parse import urlparse, parse_qs
+from datetime import datetime, time, timedelta
+
+
+class EncapsulatedOAuth2Token:
+    auth_token: str
+    refresh_token: str
+    token_url: str
+    expires_seconds: int
+    expires_at: datetime
+    refresh_expires_seconds: int
+    refresh_expires_at: datetime
+    client_auth: HTTPBasicAuth
+    cert: Optional[Tuple[str, str]]
+    log: logging.Logger
+    requested_at: datetime
+    print_auth_token: bool = True
+
+    def __init__(self, oauth_response, token_url, client_auth, cert, log, requested_at=datetime.now(), refresh_tolerance: float = 0.2) -> None:
+        self.token_url = token_url
+        self.client_auth = client_auth
+        self.cert = cert
+        self.log = log
+        self.refresh_tolerance = refresh_tolerance
+        self.parse_oauth_response(oauth_response, requested_at)
+
+    def parse_oauth_response(self, oauth_response: Dict[str, str], requested_at: datetime) -> None:
+        self.requested_at = requested_at
+        if "error" in oauth_response:
+            raise RuntimeError(
+                f"Error requesting OAuth2 token with error '{oauth_response['error']}' ({oauth_response['error_description']}")
+        else:
+            self.auth_token = oauth_response["access_token"]
+            self.refresh_token = oauth_response["refresh_token"]
+            self.expires_seconds = oauth_response["expires_in"]
+            self.refresh_expires_seconds = oauth_response["refresh_expires_in"]
+            self.refresh_expires_at = self.requested_at + \
+                timedelta(seconds=self.refresh_expires_seconds)
+            self.expires_at = self.requested_at + \
+                timedelta(seconds=self.expires_seconds)
+            if (self.print_auth_token):
+                print(f"Auth token: {self.auth_token}")
+
+    def freshness(self, expires_at: datetime) -> float:
+        delta: timedelta = expires_at - datetime.now()
+        if (delta.seconds < 0):
+            return 0.0
+        return round(delta.seconds / float(self.refresh_expires_seconds), 2)
+
+    def refresh_freshness(self) -> float:
+        return self.freshness(self.refresh_expires_at)
+
+    def token_freshness(self) -> float:
+        return self.freshness(self.expires_at)
+
+    def __repr__(self) -> str:
+        return f"OAuth[Access={self.auth_token[:8]}...;" + \
+            f"Refresh={self.refresh_token[:8]}...;" + \
+            f"Expiry={self.expires_at}" + \
+            f"(freshness={self.token_freshness()}, refresh freshness={self.refresh_freshness()}; tolerance={self.refresh_tolerance})]"
+
+    def needs_refresh(self) -> bool:
+        if datetime.now() > self.expires_at:
+            self.log.debug("Access token is expired, refreshing")
+            return True
+        elif self.refresh_freshness() <= self.refresh_tolerance:
+            self.log.debug(
+                f"Refresh token is {self.refresh_freshness() * 100}% fresh and at risk of expiring, refreshing early")
+            return True
+        elif self.token_freshness() <= self.refresh_tolerance:
+            self.log.debug(
+                f"Access token is {self.token_freshness() * 100}% fresh and at risk of expiring, refreshing early")
+        else:
+            valid_remaining = self.expires_at - datetime.now()
+            log.debug(
+                f"Token valid for another {valid_remaining.seconds}s ({self.token_freshness() * 100}% fresh)")
+            return False
+
+    def can_refresh(self) -> bool:
+        return datetime.now() < self.refresh_expires_at
+
+    def refresh(self):
+        auth_params = {
+            "grant_type": "refresh_token",
+            "refresh_token": self.refresh_token
+        }
+        headers = {
+            "Accept": "application/json"
+        }
+        requested_at = datetime.now()
+        oauth_response = requests.post(self.token_url,
+                                       data=auth_params,
+                                       headers=headers,
+                                       auth=self.client_auth,
+                                       cert=self.cert)
+        self.parse_oauth_response(oauth_response.json(), requested_at)
+        self.log.info(
+            f"Refreshed OAuth2 token, valid for {self.expires_seconds}s")
+
+    def apply_authorization(self, session: requests.Session) -> bool:
+        if self.needs_refresh():
+            if self.can_refresh():
+                self.refresh()
+            else:
+                return False
+        session.headers.update({"Authorization": f"Bearer {self.auth_token}"})
+        return True
 
 
 def configure_logging(level: str = "NOTSET", filename=None):
@@ -121,6 +225,9 @@ def parse_args():
         log.info(f"Using editor: '{editor}'")
     log.info("Command line arguments:")
     for arg in vars(args):
+        if arg in ["oauth_token", "bearer_authentication", "basic_authentication"]:
+            log.info(f" - {arg} : **SECRET**")
+            continue
         log.info(f" - {arg} : {getattr(args, arg)}")
     input("Press any key to continue.")
     return args
@@ -226,6 +333,69 @@ def sort_resources(resources: Dict[str, Union[NamingSystem, CodeSystem, ValueSet
     return list([namingsystems, codesystems, valuesets, conceptmaps])
 
 
+def request_oauth_token(session, cert, args) -> EncapsulatedOAuth2Token:
+    state = uuid4()
+    nonce = uuid4()
+    scope = "openid"
+    code_verifier: str
+    code_challenge: str
+    auth_params = {
+        "redirect_uri": args.oauth_redirect,
+        "response_type": "code",
+        "state": str(state),
+        "nonce": str(nonce),
+        "scope": scope,
+        "response_mode": "query"
+    }
+    if args.oauth_pkce:
+        code_verifier, code_challenge = pkce.generate_pkce_pair()
+
+        auth_params.update({
+            'code_challenge_method': "S256",
+            "code_challenge": code_challenge,
+        })
+    auth_url = oauth_service.get_authorize_url(**auth_params)
+    log.warning(
+        f"Please visit the authentication URL in the browser. You may need to disable the URL handler for the callback URL in the browser")
+    log.warning(
+        "You will need to copy the resulting URL from the browser and paste it into the dialog below")
+    print(auth_url)
+    auth_code = input("Authentication code? ").strip()
+    # auth_code = inquirer.text("Enter the code parameter of the callback here")
+
+    if "code=" in auth_code:
+        log.debug("Parsing returned URL to get the code")
+        o = urlparse(auth_code)
+        auth_code = parse_qs(o.query)["code"][0]
+    auth_params = {
+        "code": auth_code,
+        'grant_type': 'authorization_code',
+        'redirect_uri': args.oauth_redirect
+    }
+    if args.oauth_pkce:
+        auth_params.update({
+            "code_verifier": code_verifier
+        })
+
+    try:
+        client_auth = HTTPBasicAuth(
+            args.oauth_client_id, args.oauth_client_secret)
+        requested_at = datetime.now()
+        oauth_response = session.post(
+            args.oauth_token, data=auth_params, auth=client_auth).json()
+        oauth_credential = EncapsulatedOAuth2Token(oauth_response,
+                                                   args.oauth_token,
+                                                   client_auth,
+                                                   cert,
+                                                   log,
+                                                   requested_at)
+        log.info("Successfully authorized using OAuth2")
+        return oauth_credential
+    except Exception:
+        log.exception("Error obtaining OAuth2 Token")
+        exit(1)
+
+
 def upload_resources(args: Namespace,
                      sorted_resources: List[Dict[str, Union[NamingSystem, CodeSystem, ValueSet, ConceptMap]]],
                      oauth_service: Optional[OAuth2Service],
@@ -235,6 +405,7 @@ def upload_resources(args: Namespace,
     log.info("##########")
     log.info(f"Uploading resources to {base.geturl()}...")
     session = requests.session()
+    oauth_credential: Optional[EncapsulatedOAuth2Token] = None
     cert = None
     if args.cert != None:
         if "|" in args.cert:
@@ -256,65 +427,14 @@ def upload_resources(args: Namespace,
             session.cert = cert
 
     if oauth_service is not None:
-        state = uuid4()
-        nonce = uuid4()
-        scope = "openid"
-        code_verifier: str
-        code_challenge: str
-        auth_params = {
-            "redirect_uri": args.oauth_redirect,
-            "response_type": "code",
-            "state": str(state),
-            "nonce": str(nonce),
-            "scope": scope,
-            "response_mode": "query"
-        }
-        if args.oauth_pkce:
-            code_verifier, code_challenge = pkce.generate_pkce_pair()
-
-            auth_params.update({
-                'code_challenge_method': "S256",
-                "code_challenge": code_challenge,
-            })
-        auth_url = oauth_service.get_authorize_url(**auth_params)
-        log.warning(
-            f"Please visit the authentication URL in the browser. You may need to disable the URL handler for the callback URL in the browser")
-        log.warning(
-            "You will need to copy the resulting URL from the browser and paste it into the dialog below")
-        print(auth_url)
-        auth_code = input("Authentication code? ").strip()
-        # auth_code = inquirer.text("Enter the code parameter of the callback here")
-
-        if "code=" in auth_code:
-            log.info("Parsing returned URL to get the code")
-            o = urlparse(auth_code)
-            auth_code = parse_qs(o.query)["code"]
-        auth_params = {
-            "code": auth_code,
-            'grant_type': 'authorization_code',
-            'redirect_uri': args.oauth_redirect
-        }
-        if args.oauth_pkce:
-            auth_params.update({
-                "code_verifier": code_verifier
-            })
-
-        try:
-            session = oauth_service.get_auth_session(
-                data=auth_params, cert=cert, decoder=lambda x: json.loads(x))
-            session.headers.update(
-                {"Authorization": f"Bearer {session.access_token}"})
-        except Exception:
-            log.exception("Error obtaining OAuth2 Token")
-            exit(1)
+        oauth_credential = request_oauth_token(session, cert, args)
     elif args.basic_auth is not None or args.bearer_auth is not None:
         auth = f"Basic {args.basic_auth}" if args.bearer_auth is None else f"Bearer {args.bearer_auth}"
         log.debug(f"Using auth header: '{auth[:10]}...'")
         session.headers.update(
             {"Authorization": auth})
     session.headers.update({
-        "Accept": "application/json",
-        "Content-Type": "application/json"
+        "Accept": "application/json"
     })
 
     if getproxies():
@@ -356,6 +476,11 @@ def upload_resources(args: Namespace,
                 log.info(
                     f"uploading (try #{count_uploads}/{max_tries})")
                 js = json.loads(res.json())
+                if oauth_credential is not None:
+                    if not oauth_credential.apply_authorization(session):
+                        log.warning("Re-authorization is required")
+                        oauth_credential = request_oauth_token(
+                            session, cert, args)
                 prepared_rx = Request(method=method, url=endpoint,
                                       headers=session.headers,
                                       json=js).prepare()
