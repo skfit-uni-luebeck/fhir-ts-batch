@@ -308,7 +308,7 @@ def validate_files(args: Namespace, files):
                 if (fhir_resource != None):
                     valid_resources[filename] = fhir_resource
 
-        except:
+        except Exception as e:
             issues.append(
                 "The resource could not be parsed as FHIR. If it is in XML format, please convert it to JSON!")
 
@@ -428,8 +428,8 @@ def upload_resources(args: Namespace,
 
     if oauth_service is not None:
         oauth_credential = request_oauth_token(session, cert, args)
-    elif args.basic_auth is not None or args.bearer_auth is not None:
-        auth = f"Basic {args.basic_auth}" if args.bearer_auth is None else f"Bearer {args.bearer_auth}"
+    elif args.basic_authentication is not None or args.bearer_authentication is not None:
+        auth = f"Basic {args.basic_auth}" if args.bearer_authentication is None else f"Bearer {args.bearer_authentication}"
         log.debug(f"Using auth header: '{auth[:10]}...'")
         session.headers.update(
             {"Authorization": auth})
