@@ -243,7 +243,7 @@ def get_oauth_service(args: Namespace) -> Optional[OAuth2Service]:
     none_args = [x for x in required_args if x is None]
     present_args = [x for x in required_args if x is not None]
     if None in none_args and any(present_args):
-        log.error("OAuth2 was not configured correctly. All arguments are required, except for client ID, which can be entered interactively if it is missing.")
+        log.error("OAuth2 was not configured correctly. All arguments are required, except for client secret, which can be entered interactively if it is missing.")
         exit(1)
     elif len(none_args) == len(required_args):
         log.debug("Not using OAuth2")

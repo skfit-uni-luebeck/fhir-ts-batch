@@ -8,6 +8,8 @@ This script can be used to upload many HL7 FHIR Terminology resources to a FHIR 
 
 This program was written in Python and requires some dependencies. It requires Python 3. Also, it was only tested on GNU/Linux and macOS systems. It will certainly run using Windows Subsystem for Linux, but probably not on Windows natively!
 
+This programs was tested successfully using WSL (Ubuntu 20.04 LTS) and Python 3.8.10. It seemingly is *not* compatible with Python 3.6.x (the default of the WSL Ubuntu 18.04 LTS distribution). When in doubt, use at least Python 3.8).
+
 In a terminal, create a new virtual environment for the dependencies:
 
 ```bash
